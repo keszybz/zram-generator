@@ -2,13 +2,15 @@
 
 use anyhow::{anyhow, Context, Result};
 use ini::ini::{Ini, Properties as IniProperties, SectionIntoIter};
+use liboverdrop::FragmentScanner;
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::cmp;
 use std::fmt;
 use std::fs;
 use std::io::{prelude::*, BufReader};
-use std::iter::FromIterator;
-use std::path::Path;
+use std::iter::{Flatten, FromIterator};
+use std::path::{Path, PathBuf};
 
 pub struct Device {
     pub name: String,
@@ -80,16 +82,68 @@ pub fn read_all_devices(root: &Path) -> Result<Vec<Device>> {
     )
 }
 
-fn read_devices(root: &Path) -> Result<SectionIntoIter> {
-    let path = root.join("etc/systemd/zram-generator.conf");
-    if !path.exists() {
+fn read_devices(root: &Path) -> Result<Flatten<SectionIntoIter::Item>> {
+    let fragments = locate_fragments(root);
+
+    if fragments.is_empty() {
         println!("No configuration file found.");
-        return Ok(Ini::new().into_iter());
     }
 
-    Ok(Ini::load_from_file(&path)
-        .with_context(|| format!("Failed to read configuration from {}", path.display(),))?
-        .into_iter())
+//    let mut i = Ini::new().into_iter().chain(Ini::new().into_iter());
+
+//    for (filename, path) in fragments {
+//        let j = Ini::load_from_file(&path)
+//            .with_context(|| format!("Failed to read configuration from {}", path.display(),))?
+//            .into_iter();
+//        i = i.chain(j);
+//    }
+//    Ok(i)
+
+    let m = fragments.iter().map(|(filename, path)|
+                                 Ini::load_from_file(&path)
+                                 .with_context(|| format!("Failed to read configuration from {}", path.display(),))?
+                                 .into_iter());
+    Ok(m.flatten())
+
+//    Ok(Ini::new().into_iter())
+}
+
+fn locate_fragments(root: &Path) -> BTreeMap<String, PathBuf> {
+    let base_dirs = vec![
+        String::from(root.join("usr/lib").to_str().unwrap()),
+        String::from(root.join("usr/local/lib").to_str().unwrap()),
+        String::from(root.join("etc").to_str().unwrap()),
+        String::from(root.join("run").to_str().unwrap()), // We look at /run to allow temporary overriding
+                                                          // of configuration. There is no expectation of
+                                                          // programatic creation of config there.
+    ];
+
+    let cfg = FragmentScanner::new(
+        base_dirs.clone(),
+        "systemd/zram-generator.conf.d",
+        true,
+        vec![String::from("conf")]
+    );
+
+    let mut fragments = cfg.scan();
+
+    for dir in base_dirs.iter().rev() {
+        let path = PathBuf::from(dir).join("systemd/zram-generator.conf");
+        if path.exists() {
+            fragments.insert("zram-generator.conf".to_string(), path);
+            break;
+        }
+    }
+
+    for (filename, filepath) in &fragments {
+        println!(
+            "fragment '{}' located at '{}'",
+            filename,
+            filepath.display()
+        );
+    }
+
+    fragments
 }
 
 fn parse_optional_size(val: &str) -> Result<Option<u64>> {
